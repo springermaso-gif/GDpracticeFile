@@ -1,0 +1,930 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Neon Rhythm Dash</title>
+  <style>
+    :root {
+      --bg: #0a0c1f;
+      --bg2: #111737;
+      --neon-cyan: #2ff3ff;
+      --neon-pink: #ff48d4;
+      --neon-yellow: #ffe66e;
+      --neon-green: #59ff9d;
+      --text: #e6f0ff;
+      --danger: #ff5a87;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 20% 20%, #131a45 0%, var(--bg) 50%, #05070f 100%);
+      color: var(--text);
+      font-family: Inter, Segoe UI, Roboto, sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      touch-action: manipulation;
+      cursor: crosshair;
+    }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(180deg, rgba(7, 10, 29, 0.85), rgba(4, 6, 18, 0.95));
+      backdrop-filter: blur(4px);
+      z-index: 2;
+      transition: opacity 350ms ease;
+    }
+
+    .overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .title {
+      margin: 0 0 0.5rem;
+      font-size: clamp(2rem, 5vw, 4rem);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--neon-cyan);
+      text-shadow: 0 0 20px rgba(47, 243, 255, 0.8), 0 0 50px rgba(47, 243, 255, 0.5);
+      animation: pulse 1.8s ease-in-out infinite;
+    }
+
+    .subtitle {
+      margin: 0 0 1.5rem;
+      opacity: 0.9;
+      font-size: 1rem;
+      text-align: center;
+      max-width: 700px;
+      line-height: 1.45;
+    }
+
+    .btn {
+      border: 1px solid rgba(47, 243, 255, 0.7);
+      background: rgba(47, 243, 255, 0.1);
+      color: var(--text);
+      padding: 0.8rem 1.6rem;
+      border-radius: 999px;
+      font-size: 1rem;
+      cursor: pointer;
+      box-shadow: 0 0 16px rgba(47, 243, 255, 0.35);
+      transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: 0 0 28px rgba(47, 243, 255, 0.7);
+      background: rgba(47, 243, 255, 0.2);
+    }
+
+    .hint {
+      margin-top: 1rem;
+      opacity: 0.85;
+      font-size: 0.9rem;
+      text-align: center;
+      line-height: 1.35;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); filter: brightness(1); }
+      50% { transform: scale(1.03); filter: brightness(1.2); }
+    }
+  </style>
+</head>
+<body>
+  <div id="startOverlay" class="overlay">
+    <h1 class="title">Neon Rhythm Dash</h1>
+    <p class="subtitle">
+      A mini rhythm-platformer inspired by Geometry Dash. Tap/Click/Space to jump,<br>
+      trigger orbs mid-air, survive portals/speed shifts, and conquer two levels.
+    </p>
+    <button id="playBtn" class="btn">Play</button>
+    <div class="hint">
+      Controls: <b>Space / Mouse / Touch</b> jump • <b>P</b> pause • <b>R</b> restart • <b>E</b> editor mode
+    </div>
+  </div>
+
+  <canvas id="game"></canvas>
+
+  <script>
+    "use strict";
+
+    /** Utility helpers */
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const rand = (min, max) => Math.random() * (max - min) + min;
+
+    class ParticleSystem {
+      constructor() {
+        this.particles = [];
+      }
+
+      burst(x, y, color, count = 16, speed = 240, life = 0.45) {
+        for (let i = 0; i < count; i++) {
+          const a = Math.random() * Math.PI * 2;
+          const s = rand(speed * 0.25, speed);
+          this.particles.push({
+            x,
+            y,
+            vx: Math.cos(a) * s,
+            vy: Math.sin(a) * s,
+            r: rand(1.5, 3.8),
+            life,
+            maxLife: life,
+            color
+          });
+        }
+      }
+
+      update(dt) {
+        for (const p of this.particles) {
+          p.life -= dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          p.vx *= 0.98;
+          p.vy = p.vy * 0.98 + 320 * dt;
+        }
+        this.particles = this.particles.filter(p => p.life > 0);
+      }
+
+      draw(ctx, cameraX) {
+        for (const p of this.particles) {
+          const alpha = clamp(p.life / p.maxLife, 0, 1);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = p.color;
+          ctx.shadowBlur = 16;
+          ctx.shadowColor = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x - cameraX, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    /** Minimal synth audio manager: looping background + SFX. */
+    class AudioManager {
+      constructor() {
+        this.ctx = null;
+        this.master = null;
+        this.musicTimer = null;
+        this.step = 0;
+        this.enabled = false;
+      }
+
+      async init() {
+        if (this.enabled) return;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        this.ctx = new Ctx();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = 0.22;
+        this.master.connect(this.ctx.destination);
+        this.enabled = true;
+        this.startMusic();
+      }
+
+      tone(freq, duration = 0.1, type = "sine", vol = 0.14) {
+        if (!this.enabled) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.value = freq;
+        gain.gain.value = 0;
+        osc.connect(gain);
+        gain.connect(this.master);
+
+        const t = this.ctx.currentTime;
+        gain.gain.linearRampToValueAtTime(vol, t + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+        osc.start(t);
+        osc.stop(t + duration + 0.03);
+      }
+
+      startMusic() {
+        if (!this.enabled || this.musicTimer) return;
+        const melody = [262, 392, 330, 523, 392, 330, 294, 440, 349, 523, 440, 392, 330, 294, 262, 392];
+        const bass = [131, 131, 147, 147, 98, 98, 110, 110];
+
+        this.musicTimer = setInterval(() => {
+          if (!this.ctx || this.ctx.state !== "running") return;
+          const m = melody[this.step % melody.length];
+          const b = bass[this.step % bass.length];
+          this.tone(m, 0.12, "triangle", 0.05);
+          if (this.step % 2 === 0) this.tone(b, 0.2, "sawtooth", 0.04);
+          if (this.step % 4 === 2) this.tone(m * 2, 0.05, "square", 0.02);
+          this.step++;
+        }, 210);
+      }
+
+      jump() { this.tone(620, 0.11, "square", 0.09); }
+      orb() { this.tone(880, 0.13, "triangle", 0.08); }
+      die() { this.tone(180, 0.3, "sawtooth", 0.13); }
+      pad() { this.tone(740, 0.08, "triangle", 0.1); }
+      portal() { this.tone(500, 0.12, "sine", 0.08); }
+      speed() { this.tone(980, 0.07, "square", 0.06); }
+    }
+
+    class Player {
+      constructor(x, y) {
+        this.spawnX = x;
+        this.spawnY = y;
+        this.size = 30;
+        this.reset();
+      }
+
+      reset() {
+        this.x = this.spawnX;
+        this.y = this.spawnY;
+        this.vx = 0;
+        this.vy = 0;
+        this.rotation = 0;
+        this.gravitySign = 1;
+        this.onGround = false;
+        this.form = "cube";
+        this.orbConsumedAt = -1;
+      }
+
+      get bounds() {
+        return { x: this.x, y: this.y, w: this.size, h: this.size };
+      }
+    }
+
+    class Level {
+      constructor(config) {
+        Object.assign(this, config);
+      }
+    }
+
+    class GameEngine {
+      constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext("2d");
+        this.ui = {
+          startOverlay: document.getElementById("startOverlay"),
+          playBtn: document.getElementById("playBtn")
+        };
+
+        this.audio = new AudioManager();
+        this.particles = new ParticleSystem();
+
+        this.levels = this.buildLevels();
+        this.levelIndex = 0;
+        this.level = this.levels[this.levelIndex];
+
+        this.groundY = 0;
+        this.player = new Player(160, 0);
+
+        this.cameraX = 0;
+        this.progress = 0;
+        this.baseScroll = 350;
+        this.scrollSpeed = this.baseScroll;
+
+        this.attempt = 1;
+        this.running = false;
+        this.paused = false;
+        this.editorMode = false;
+        this.editorBrush = "spike";
+
+        this.inputQueueJump = false;
+        this.lastTimestamp = 0;
+        this.deathFlash = 0;
+
+        this.resize();
+        this.resetLevel(false);
+        this.bindEvents();
+        requestAnimationFrame(this.loop.bind(this));
+      }
+
+      buildLevels() {
+        const level1 = new Level({
+          name: "Pulse Lane",
+          bgShift: "#14204f",
+          length: 6000,
+          obstacles: [
+            { type: "spike", x: 650, y: 0, w: 40, h: 40 },
+            { type: "spike", x: 860, y: 0, w: 40, h: 40 },
+            { type: "block", x: 1060, y: 60, w: 60, h: 60 },
+            { type: "spike", x: 1130, y: 0, w: 40, h: 40 },
+            { type: "spike", x: 1170, y: 0, w: 40, h: 40 },
+            { type: "moving", x: 1520, y: 130, w: 42, h: 42, amp: 70, freq: 3.2 },
+            { type: "block", x: 1820, y: 80, w: 80, h: 80 },
+            { type: "spike", x: 2010, y: 0, w: 40, h: 40 },
+            { type: "spike", x: 2052, y: 0, w: 40, h: 40 },
+            { type: "block", x: 2490, y: 100, w: 60, h: 60 },
+            { type: "moving", x: 2800, y: 160, w: 46, h: 46, amp: 95, freq: 2.4 },
+            { type: "spike", x: 3170, y: 0, w: 45, h: 45 },
+            { type: "spike", x: 3216, y: 0, w: 45, h: 45 },
+            { type: "block", x: 3550, y: 90, w: 80, h: 80 },
+            { type: "spike", x: 3800, y: 0, w: 40, h: 40 },
+            { type: "moving", x: 4190, y: 150, w: 48, h: 48, amp: 80, freq: 3.8 },
+            { type: "spike", x: 4560, y: 0, w: 40, h: 40 },
+            { type: "spike", x: 4602, y: 0, w: 40, h: 40 },
+            { type: "block", x: 5000, y: 120, w: 90, h: 90 },
+            { type: "spike", x: 5380, y: 0, w: 40, h: 40 }
+          ],
+          pads: [
+            { x: 1360, y: 0, w: 60, h: 14, power: 700 },
+            { x: 3420, y: 0, w: 60, h: 14, power: 760 }
+          ],
+          orbs: [
+            { x: 1660, y: 190, r: 16 },
+            { x: 2890, y: 220, r: 16 },
+            { x: 4700, y: 200, r: 16 }
+          ],
+          portals: [
+            { x: 2250, y: 120, w: 26, h: 120, mode: "gravity" },
+            { x: 2670, y: 120, w: 26, h: 120, mode: "gravity" }
+          ],
+          speedZones: [
+            { x: 900, y: 0, w: 420, speed: 0.85 },
+            { x: 2400, y: 0, w: 700, speed: 1.22 },
+            { x: 4380, y: 0, w: 680, speed: 1.35 }
+          ]
+        });
+
+        const level2 = new Level({
+          name: "Hyperline",
+          bgShift: "#2a124f",
+          length: 7800,
+          obstacles: [
+            { type: "spike", x: 640, y: 0, w: 40, h: 40 },
+            { type: "spike", x: 682, y: 0, w: 40, h: 40 },
+            { type: "spike", x: 724, y: 0, w: 40, h: 40 },
+            { type: "block", x: 980, y: 80, w: 70, h: 70 },
+            { type: "moving", x: 1160, y: 160, w: 46, h: 46, amp: 110, freq: 3.8 },
+            { type: "block", x: 1440, y: 120, w: 76, h: 76 },
+            { type: "spike", x: 1710, y: 0, w: 42, h: 42 },
+            { type: "spike", x: 1752, y: 0, w: 42, h: 42 },
+            { type: "block", x: 2060, y: 145, w: 82, h: 82 },
+            { type: "moving", x: 2270, y: 180, w: 50, h: 50, amp: 125, freq: 4.2 },
+            { type: "spike", x: 2550, y: 0, w: 45, h: 45 },
+            { type: "spike", x: 2596, y: 0, w: 45, h: 45 },
+            { type: "spike", x: 2642, y: 0, w: 45, h: 45 },
+            { type: "block", x: 2980, y: 100, w: 78, h: 78 },
+            { type: "moving", x: 3180, y: 140, w: 52, h: 52, amp: 110, freq: 3.1 },
+            { type: "block", x: 3510, y: 70, w: 92, h: 92 },
+            { type: "spike", x: 3870, y: 0, w: 44, h: 44 },
+            { type: "spike", x: 3914, y: 0, w: 44, h: 44 },
+            { type: "moving", x: 4260, y: 190, w: 56, h: 56, amp: 135, freq: 4.6 },
+            { type: "block", x: 4660, y: 100, w: 88, h: 88 },
+            { type: "spike", x: 5060, y: 0, w: 46, h: 46 },
+            { type: "spike", x: 5108, y: 0, w: 46, h: 46 },
+            { type: "moving", x: 5440, y: 150, w: 56, h: 56, amp: 140, freq: 4.8 },
+            { type: "block", x: 5900, y: 130, w: 92, h: 92 },
+            { type: "spike", x: 6220, y: 0, w: 48, h: 48 },
+            { type: "spike", x: 6268, y: 0, w: 48, h: 48 },
+            { type: "spike", x: 6316, y: 0, w: 48, h: 48 },
+            { type: "moving", x: 6680, y: 180, w: 60, h: 60, amp: 150, freq: 5.2 },
+            { type: "block", x: 7060, y: 80, w: 95, h: 95 }
+          ],
+          pads: [
+            { x: 1320, y: 0, w: 60, h: 14, power: 800 },
+            { x: 2880, y: 0, w: 60, h: 14, power: 830 },
+            { x: 5600, y: 0, w: 60, h: 14, power: 870 }
+          ],
+          orbs: [
+            { x: 1560, y: 200, r: 16 },
+            { x: 2720, y: 260, r: 16 },
+            { x: 3720, y: 220, r: 16 },
+            { x: 4840, y: 270, r: 16 },
+            { x: 6460, y: 230, r: 16 }
+          ],
+          portals: [
+            { x: 2140, y: 130, w: 28, h: 130, mode: "gravity" },
+            { x: 3270, y: 130, w: 28, h: 130, mode: "gravity" },
+            { x: 5160, y: 130, w: 28, h: 130, mode: "gravity" },
+            { x: 6860, y: 130, w: 28, h: 130, mode: "gravity" }
+          ],
+          speedZones: [
+            { x: 840, y: 0, w: 500, speed: 1.1 },
+            { x: 2360, y: 0, w: 720, speed: 1.42 },
+            { x: 4020, y: 0, w: 980, speed: 1.58 },
+            { x: 6200, y: 0, w: 1080, speed: 1.72 }
+          ]
+        });
+
+        return [level1, level2];
+      }
+
+      bindEvents() {
+        window.addEventListener("resize", () => this.resize());
+
+        window.addEventListener("keydown", (e) => {
+          if (e.code === "Space") {
+            e.preventDefault();
+            this.queueJump();
+          }
+          if (e.code === "KeyP") this.paused = !this.paused;
+          if (e.code === "KeyR") this.die(true);
+          if (e.code === "KeyE") this.editorMode = !this.editorMode;
+          if (this.editorMode && /^Digit[1-6]$/.test(e.code)) {
+            const lookup = { Digit1: "spike", Digit2: "block", Digit3: "orb", Digit4: "pad", Digit5: "gravity", Digit6: "speed" };
+            this.editorBrush = lookup[e.code];
+          }
+        });
+
+        const pointerHandler = () => this.queueJump();
+        this.canvas.addEventListener("mousedown", pointerHandler);
+        this.canvas.addEventListener("touchstart", (e) => {
+          e.preventDefault();
+          pointerHandler();
+        }, { passive: false });
+
+        this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+        this.canvas.addEventListener("pointerdown", (e) => {
+          if (!this.editorMode || !this.running) return;
+          const worldX = e.clientX + this.cameraX;
+          const worldY = e.clientY;
+          if (e.button === 2) this.editorRemove(worldX, worldY);
+          else this.editorPlace(worldX, worldY);
+        });
+
+        this.ui.playBtn.addEventListener("click", async () => {
+          await this.audio.init();
+          this.running = true;
+          this.ui.startOverlay.classList.add("hidden");
+        });
+      }
+
+      queueJump() {
+        if (!this.running || this.paused) return;
+        this.inputQueueJump = true;
+      }
+
+      resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+        this.groundY = this.canvas.height - 110;
+      }
+
+      resetLevel(incrementAttempt = true) {
+        if (incrementAttempt) this.attempt++;
+        this.player.reset();
+        this.player.y = this.groundY - this.player.size;
+        this.cameraX = 0;
+        this.progress = 0;
+        this.scrollSpeed = this.baseScroll;
+      }
+
+      aabb(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+      }
+
+      spikeCollision(playerRect, s) {
+        // Approximate spike collision by triangle apex area check + fallback AABB.
+        const apexX = s.x + s.w * 0.5;
+        const apexY = this.groundY - s.h;
+        const px = playerRect.x + playerRect.w * 0.5;
+        const py = playerRect.y + playerRect.h;
+        const normalized = Math.abs(px - apexX) / (s.w * 0.5);
+        const spikeSurfaceY = this.groundY - s.h * (1 - normalized);
+        const inside = normalized <= 1 && py >= spikeSurfaceY && py <= this.groundY;
+        return inside || this.aabb(playerRect, { x: s.x + 4, y: this.groundY - s.h + 10, w: s.w - 8, h: s.h - 10 });
+      }
+
+      applyJump(power = 640) {
+        this.player.vy = -power * this.player.gravitySign;
+        this.player.onGround = false;
+        this.player.rotation += Math.PI / 2;
+        this.particles.burst(this.player.x + this.player.size / 2, this.player.y + this.player.size / 2, "#2ff3ff", 8, 180, 0.35);
+        this.audio.jump();
+      }
+
+      handleInputAndOrbs() {
+        if (!this.inputQueueJump) return;
+
+        // Ground jump.
+        if (this.player.onGround) {
+          this.applyJump();
+          this.inputQueueJump = false;
+          return;
+        }
+
+        // Mid-air orb jump.
+        for (let i = 0; i < this.level.orbs.length; i++) {
+          const orb = this.level.orbs[i];
+          if (orb.used) continue;
+          const cx = this.player.x + this.player.size / 2;
+          const cy = this.player.y + this.player.size / 2;
+          const d = Math.hypot(cx - orb.x, cy - orb.y);
+          if (d < orb.r + 28) {
+            this.player.vy = -760 * this.player.gravitySign;
+            orb.used = true;
+            this.audio.orb();
+            this.particles.burst(orb.x, orb.y, "#ff48d4", 14, 260, 0.42);
+            break;
+          }
+        }
+        this.inputQueueJump = false;
+      }
+
+      update(dt, now) {
+        if (!this.running || this.paused) return;
+
+        this.deathFlash = Math.max(0, this.deathFlash - dt * 3);
+
+        // Speed zones.
+        let zoneSpeed = 1;
+        for (const z of this.level.speedZones) {
+          if (this.player.x + this.player.size > z.x && this.player.x < z.x + z.w) {
+            zoneSpeed = z.speed;
+            break;
+          }
+        }
+        const oldSpeed = this.scrollSpeed;
+        this.scrollSpeed = lerp(this.scrollSpeed, this.baseScroll * zoneSpeed, dt * 4.5);
+        if (Math.abs(this.scrollSpeed - oldSpeed) > 30) this.audio.speed();
+
+        this.handleInputAndOrbs();
+
+        const gravity = 1900;
+        this.player.vy += gravity * this.player.gravitySign * dt;
+        this.player.y += this.player.vy * dt;
+
+        // Auto-scroll world; player sticks around left quarter.
+        this.player.x += this.scrollSpeed * dt;
+        const targetCam = this.player.x - this.canvas.width * 0.25;
+        this.cameraX = lerp(this.cameraX, targetCam, clamp(dt * 8, 0, 1));
+
+        // Floor + ceiling for gravity-flip gameplay.
+        const floor = this.groundY - this.player.size;
+        const ceiling = 80;
+
+        if (this.player.gravitySign === 1) {
+          if (this.player.y >= floor) {
+            this.player.y = floor;
+            this.player.vy = 0;
+            this.player.onGround = true;
+          } else this.player.onGround = false;
+          if (this.player.y < ceiling) this.die();
+        } else {
+          if (this.player.y <= ceiling) {
+            this.player.y = ceiling;
+            this.player.vy = 0;
+            this.player.onGround = true;
+          } else this.player.onGround = false;
+          if (this.player.y > floor) this.die();
+        }
+
+        // Collisions with gameplay objects.
+        const p = this.player.bounds;
+
+        for (const pad of this.level.pads) {
+          const padRect = { x: pad.x, y: this.groundY - pad.h, w: pad.w, h: pad.h };
+          if (this.aabb(p, padRect) && this.player.onGround) {
+            this.player.vy = -pad.power * this.player.gravitySign;
+            this.player.onGround = false;
+            this.audio.pad();
+            this.particles.burst(pad.x + pad.w / 2, padRect.y, "#59ff9d", 12, 240, 0.4);
+          }
+        }
+
+        for (const portal of this.level.portals) {
+          const rect = { x: portal.x, y: portal.y, w: portal.w, h: portal.h };
+          if (this.aabb(p, rect) && !portal.cooldown) {
+            this.player.gravitySign *= -1;
+            portal.cooldown = 0.5;
+            this.audio.portal();
+            this.particles.burst(portal.x + portal.w / 2, portal.y + portal.h / 2, "#ffe66e", 16, 270, 0.42);
+          }
+          portal.cooldown = Math.max(0, (portal.cooldown || 0) - dt);
+        }
+
+        for (const o of this.level.obstacles) {
+          let rect;
+          if (o.type === "moving") {
+            const y = o.y + Math.sin(now * 0.001 * o.freq + o.x * 0.01) * o.amp;
+            rect = { x: o.x, y, w: o.w, h: o.h };
+            o.renderY = y;
+          } else if (o.type === "block") {
+            rect = { x: o.x, y: this.groundY - o.h - o.y, w: o.w, h: o.h };
+          } else if (o.type === "spike") {
+            if (this.spikeCollision(p, o)) {
+              this.die();
+              return;
+            }
+            continue;
+          }
+
+          if (this.aabb(p, rect)) {
+            this.die();
+            return;
+          }
+        }
+
+        // Level complete.
+        if (this.player.x >= this.level.length) {
+          if (this.levelIndex < this.levels.length - 1) {
+            this.levelIndex++;
+            this.level = this.levels[this.levelIndex];
+            this.resetLevel(true);
+          } else {
+            this.levelIndex = 0;
+            this.level = this.levels[this.levelIndex];
+            this.resetLevel(true);
+          }
+        }
+
+        this.progress = clamp(this.player.x / this.level.length, 0, 1);
+        this.player.rotation += dt * 8 * (this.player.onGround ? 0.2 : 1.4) * this.player.gravitySign;
+        this.particles.update(dt);
+      }
+
+      die(manual = false) {
+        this.audio.die();
+        this.particles.burst(this.player.x + this.player.size / 2, this.player.y + this.player.size / 2, "#ff5a87", 24, 330, 0.55);
+        this.deathFlash = manual ? 0.2 : 0.55;
+        for (const orb of this.level.orbs) orb.used = false;
+        for (const portal of this.level.portals) portal.cooldown = 0;
+        this.resetLevel(true);
+      }
+
+      editorPlace(worldX, worldY) {
+        const gx = Math.round(worldX / 40) * 40;
+        const gy = Math.round(worldY / 40) * 40;
+        switch (this.editorBrush) {
+          case "spike":
+            this.level.obstacles.push({ type: "spike", x: gx, y: 0, w: 40, h: 40 });
+            break;
+          case "block":
+            this.level.obstacles.push({ type: "block", x: gx, y: Math.max(0, this.groundY - gy - 40), w: 40, h: 40 });
+            break;
+          case "orb":
+            this.level.orbs.push({ x: gx, y: gy, r: 16 });
+            break;
+          case "pad":
+            this.level.pads.push({ x: gx, y: 0, w: 60, h: 14, power: 760 });
+            break;
+          case "gravity":
+            this.level.portals.push({ x: gx, y: 120, w: 28, h: 130, mode: "gravity" });
+            break;
+          case "speed":
+            this.level.speedZones.push({ x: gx, y: 0, w: 260, speed: 1.4 });
+            break;
+        }
+      }
+
+      editorRemove(worldX, worldY) {
+        const dist = (ax, ay) => Math.hypot(ax - worldX, ay - worldY);
+        let best = null;
+
+        const candidates = [];
+        this.level.obstacles.forEach((o, i) => {
+          const y = o.type === "moving" ? (o.renderY ?? o.y) : (o.type === "spike" ? this.groundY - o.h : this.groundY - o.h - o.y);
+          candidates.push({ kind: "obstacles", i, d: dist(o.x + o.w / 2, y + o.h / 2) });
+        });
+        this.level.orbs.forEach((o, i) => candidates.push({ kind: "orbs", i, d: dist(o.x, o.y) }));
+        this.level.pads.forEach((o, i) => candidates.push({ kind: "pads", i, d: dist(o.x + o.w / 2, this.groundY - o.h) }));
+        this.level.portals.forEach((o, i) => candidates.push({ kind: "portals", i, d: dist(o.x + o.w / 2, o.y + o.h / 2) }));
+        this.level.speedZones.forEach((o, i) => candidates.push({ kind: "speedZones", i, d: dist(o.x + o.w / 2, this.groundY - 10) }));
+
+        for (const c of candidates) if (!best || c.d < best.d) best = c;
+        if (best && best.d < 70) this.level[best.kind].splice(best.i, 1);
+      }
+
+      drawGrid() {
+        if (!this.editorMode) return;
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,0.08)";
+        ctx.lineWidth = 1;
+        for (let x = -(this.cameraX % 40); x < this.canvas.width; x += 40) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, this.canvas.height);
+          ctx.stroke();
+        }
+        for (let y = 0; y < this.canvas.height; y += 40) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(this.canvas.width, y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      drawBackground(now) {
+        const ctx = this.ctx;
+        const gradient = ctx.createLinearGradient(0, 0, 0, this.canvas.height);
+        gradient.addColorStop(0, this.level.bgShift);
+        gradient.addColorStop(1, "#090d1f");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        // Parallax neon strips.
+        for (let i = 0; i < 3; i++) {
+          const speed = (i + 1) * 0.12;
+          const y = 120 + i * 130 + Math.sin(now * 0.001 + i) * 20;
+          ctx.fillStyle = ["rgba(47,243,255,0.12)", "rgba(255,72,212,0.1)", "rgba(89,255,157,0.1)"][i];
+          for (let x = -((this.cameraX * speed) % 180); x < this.canvas.width; x += 180) {
+            ctx.fillRect(x, y, 120, 4);
+          }
+        }
+
+        // Ground.
+        ctx.fillStyle = "#10183a";
+        ctx.fillRect(0, this.groundY, this.canvas.width, this.canvas.height - this.groundY);
+        ctx.strokeStyle = "rgba(47,243,255,0.8)";
+        ctx.shadowColor = "#2ff3ff";
+        ctx.shadowBlur = 16;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, this.groundY);
+        ctx.lineTo(this.canvas.width, this.groundY);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+
+      drawObjects(now) {
+        const ctx = this.ctx;
+        const cam = this.cameraX;
+
+        // Speed zones.
+        for (const z of this.level.speedZones) {
+          const x = z.x - cam;
+          if (x + z.w < -40 || x > this.canvas.width + 40) continue;
+          const hue = z.speed < 1 ? "89,255,157" : "255,230,110";
+          ctx.fillStyle = `rgba(${hue},0.08)`;
+          ctx.fillRect(x, 0, z.w, this.canvas.height);
+          ctx.strokeStyle = `rgba(${hue},0.55)`;
+          ctx.strokeRect(x, this.groundY + 4, z.w, 18);
+        }
+
+        // Obstacles.
+        for (const o of this.level.obstacles) {
+          const x = o.x - cam;
+          if (x + o.w < -80 || x > this.canvas.width + 80) continue;
+
+          if (o.type === "spike") {
+            const y = this.groundY;
+            ctx.fillStyle = "#ff5a87";
+            ctx.shadowColor = "#ff5a87";
+            ctx.shadowBlur = 18;
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + o.w / 2, y - o.h);
+            ctx.lineTo(x + o.w, y);
+            ctx.closePath();
+            ctx.fill();
+          } else {
+            const y = o.type === "moving" ? (o.renderY ?? o.y) : this.groundY - o.h - o.y;
+            const color = o.type === "moving" ? "#ffe66e" : "#2ff3ff";
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 20;
+            ctx.fillRect(x, y, o.w, o.h);
+          }
+        }
+
+        // Pads.
+        for (const pad of this.level.pads) {
+          const x = pad.x - cam;
+          const y = this.groundY - pad.h;
+          if (x + pad.w < -80 || x > this.canvas.width + 80) continue;
+          ctx.fillStyle = "#59ff9d";
+          ctx.shadowColor = "#59ff9d";
+          ctx.shadowBlur = 14;
+          ctx.fillRect(x, y, pad.w, pad.h);
+        }
+
+        // Orbs.
+        for (const orb of this.level.orbs) {
+          if (orb.used) continue;
+          const x = orb.x - cam;
+          if (x + orb.r < -80 || x - orb.r > this.canvas.width + 80) continue;
+          const pulse = 1 + Math.sin(now * 0.01 + orb.x * 0.05) * 0.15;
+          ctx.fillStyle = "#ff48d4";
+          ctx.shadowColor = "#ff48d4";
+          ctx.shadowBlur = 20;
+          ctx.beginPath();
+          ctx.arc(x, orb.y, orb.r * pulse, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Portals.
+        for (const portal of this.level.portals) {
+          const x = portal.x - cam;
+          if (x + portal.w < -80 || x > this.canvas.width + 80) continue;
+          const pulse = 0.7 + Math.sin(now * 0.01 + portal.x * 0.03) * 0.3;
+          ctx.strokeStyle = "#ffe66e";
+          ctx.shadowColor = "#ffe66e";
+          ctx.shadowBlur = 20;
+          ctx.lineWidth = 4;
+          ctx.strokeRect(x, portal.y, portal.w, portal.h);
+          ctx.globalAlpha = pulse;
+          ctx.fillStyle = "rgba(255,230,110,0.25)";
+          ctx.fillRect(x, portal.y, portal.w, portal.h);
+          ctx.globalAlpha = 1;
+        }
+
+        ctx.shadowBlur = 0;
+      }
+
+      drawPlayer() {
+        const ctx = this.ctx;
+        const x = this.player.x - this.cameraX;
+        const y = this.player.y;
+        const s = this.player.size;
+
+        ctx.save();
+        ctx.translate(x + s / 2, y + s / 2);
+        ctx.rotate(this.player.rotation);
+        ctx.fillStyle = this.player.gravitySign === 1 ? "#2ff3ff" : "#ffe66e";
+        ctx.shadowColor = this.player.gravitySign === 1 ? "#2ff3ff" : "#ffe66e";
+        ctx.shadowBlur = 22;
+        ctx.fillRect(-s / 2, -s / 2, s, s);
+
+        // Inner cut for style.
+        ctx.fillStyle = "rgba(10,12,31,0.35)";
+        ctx.fillRect(-s / 4, -s / 4, s / 2, s / 2);
+        ctx.restore();
+      }
+
+      drawHUD() {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+
+        // Progress bar.
+        ctx.fillStyle = "rgba(255,255,255,0.12)";
+        ctx.fillRect(18, 18, w - 36, 12);
+        ctx.fillStyle = "#2ff3ff";
+        ctx.shadowColor = "#2ff3ff";
+        ctx.shadowBlur = 16;
+        ctx.fillRect(18, 18, (w - 36) * this.progress, 12);
+        ctx.shadowBlur = 0;
+
+        // Text data.
+        ctx.font = "600 17px Inter, sans-serif";
+        ctx.fillStyle = "#e6f0ff";
+        ctx.fillText(`Level ${this.levelIndex + 1}: ${this.level.name}`, 18, 56);
+        ctx.fillText(`Attempt ${this.attempt}`, 18, 80);
+        ctx.fillText(`${Math.floor(this.progress * 100)}%`, w - 86, 80);
+
+        if (this.paused) {
+          ctx.fillStyle = "rgba(0,0,0,0.45)";
+          ctx.fillRect(0, 0, w, this.canvas.height);
+          ctx.fillStyle = "#fff";
+          ctx.font = "700 48px Inter, sans-serif";
+          ctx.fillText("PAUSED", w / 2 - 98, this.canvas.height / 2);
+        }
+
+        if (this.editorMode) {
+          ctx.fillStyle = "rgba(0,0,0,0.42)";
+          ctx.fillRect(14, this.canvas.height - 92, 520, 72);
+          ctx.fillStyle = "#ffe66e";
+          ctx.font = "600 14px Inter, sans-serif";
+          ctx.fillText(`EDITOR MODE (brush: ${this.editorBrush})`, 24, this.canvas.height - 62);
+          ctx.fillStyle = "#e6f0ff";
+          ctx.fillText("1 Spike  2 Block  3 Orb  4 Pad  5 Gravity  6 Speed  | Click place / Right click remove", 24, this.canvas.height - 38);
+        }
+      }
+
+      drawDeathFlash() {
+        if (this.deathFlash <= 0) return;
+        this.ctx.fillStyle = `rgba(255,90,135,${this.deathFlash * 0.3})`;
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      }
+
+      render(now) {
+        this.drawBackground(now);
+        this.drawGrid();
+        this.drawObjects(now);
+        this.drawPlayer();
+        this.particles.draw(this.ctx, this.cameraX);
+        this.drawHUD();
+        this.drawDeathFlash();
+      }
+
+      loop(ts) {
+        const dt = clamp((ts - this.lastTimestamp) / 1000, 0, 0.033);
+        this.lastTimestamp = ts;
+
+        this.update(dt, ts);
+        this.render(ts);
+
+        requestAnimationFrame(this.loop.bind(this));
+      }
+    }
+
+    // Boot game.
+    const canvas = document.getElementById("game");
+    new GameEngine(canvas);
+  </script>
+</body>
+</html>
